@@ -12,7 +12,6 @@
 //!   4. On hotkey / click, call `set_window_position` / `set_window_size`.
 //!   5. `decorations::OverlayWindow` draws the bubble titlebar on top.
 
-use accessibility::AXUIElement;
 use core_foundation::{
     base::TCFType,
     boolean::CFBoolean,
@@ -26,6 +25,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use wm98_core::{config::Config, layout::FloatingLayout, theme::Theme};
+
+/// Lightweight snapshot returned by each sync pass.
+#[derive(Debug, Clone)]
+pub struct WindowInfo {
+    pub pid:   i32,
+    pub title: String,
+}
 
 /// A window tracked by the macOS WM.
 #[derive(Debug, Clone)]
@@ -54,19 +60,27 @@ impl WindowManager {
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
-        log::info!("98wm macOS running — press Ctrl-C to exit");
+        println!("98wm macOS — press Ctrl-C to exit\n");
 
+        let mut tick: u64 = 0;
         loop {
-            self.sync_windows()?;
-            // TODO: process hotkeys via CGEventTap
+            let windows = self.sync_windows()?;
+
+            // Print the window list every second (every 10 ticks × 100 ms)
+            if tick % 10 == 0 {
+                println!("--- tick {} — {} window(s) ---", tick, windows.len());
+                for w in &windows {
+                    println!("  [{:>6}]  {}", w.pid, w.title);
+                }
+            }
+
+            tick += 1;
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
-    /// Enumerate on-screen windows and update our internal map.
-    fn sync_windows(&mut self) -> anyhow::Result<()> {
-        // CGWindowListCopyWindowInfo returns a CFArrayRef of CFDictionaryRef.
-        // We wrap it in a CFArray<CFDictionary<CFString, CFType>> for safe iteration.
+    /// Enumerate on-screen windows and return the current list.
+    fn sync_windows(&mut self) -> anyhow::Result<Vec<WindowInfo>> {
         use core_foundation::{
             array::CFArray,
             base::CFType,
@@ -77,16 +91,31 @@ impl WindowManager {
             CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
         };
         if raw.is_null() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         let array: CFArray<CFDictionary<CFString, CFType>> =
             unsafe { CFArray::wrap_under_create_rule(raw as _) };
 
-        let pid_key  = CFString::from_static_string("kCGWindowOwnerPID");
-        let name_key = CFString::from_static_string("kCGWindowName");
+        let pid_key   = CFString::from_static_string("kCGWindowOwnerPID");
+        let name_key  = CFString::from_static_string("kCGWindowOwnerName");
+        let title_key = CFString::from_static_string("kCGWindowName");
+        let layer_key = CFString::from_static_string("kCGWindowLayer");
+
+        let mut seen = Vec::new();
 
         for entry in array.iter() {
+            let layer: i32 = entry
+                .find(layer_key.as_concrete_TypeRef())
+                .and_then(|v| v.clone().downcast_into::<CFNumber>())
+                .and_then(|n| n.to_i32())
+                .unwrap_or(0);
+
+            // Skip background/desktop layers — only normal app windows (layer 0)
+            if layer != 0 {
+                continue;
+            }
+
             let pid: i32 = entry
                 .find(pid_key.as_concrete_TypeRef())
                 .and_then(|v| v.clone().downcast_into::<CFNumber>())
@@ -97,34 +126,40 @@ impl WindowManager {
                 continue;
             }
 
-            let _title: String = entry
+            let app: String = entry
                 .find(name_key.as_concrete_TypeRef())
+                .and_then(|v| v.clone().downcast_into::<CFString>())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "<unknown>".into());
+
+            let title: String = entry
+                .find(title_key.as_concrete_TypeRef())
                 .and_then(|v| v.clone().downcast_into::<CFString>())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            // TODO: read AXPosition / AXSize for this pid via the AX API,
-            // then upsert into self.layout and self.windows.
+            let label = if title.is_empty() { app } else { format!("{title}") };
+
+            seen.push(WindowInfo { pid, title: label });
         }
 
-        Ok(())
+        Ok(seen)
     }
 
     /// Move a window to (x, y) using the Accessibility API.
     ///
     /// CGPoint must be packed into an AXValue before setting — see:
     /// https://developer.apple.com/documentation/appkit/nsaccessibility/position
-    pub fn move_window(&self, pid: i32, x: f64, y: f64) -> anyhow::Result<()> {
-        let _app = AXUIElement::application(pid);
+    pub fn move_window(&self, _pid: i32, _x: f64, _y: f64) -> anyhow::Result<()> {
         // TODO: encode (x, y) as AXValueType::kAXValueCGPointType via
-        //       AXValueCreate and call AXUIElementSetAttributeValue.
-        let _ = (x, y);
+        //       AXValueCreate and call AXUIElementSetAttributeValue on the app's AXUIElement.
         Ok(())
     }
 }
 
 /// Check that Accessibility permissions have been granted; prompt if not.
 fn check_accessibility_permission() -> anyhow::Result<()> {
+    #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
         fn AXIsProcessTrustedWithOptions(
             options: core_foundation::base::CFTypeRef,
