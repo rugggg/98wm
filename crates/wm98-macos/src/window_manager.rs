@@ -16,6 +16,7 @@ use core_foundation::{
     base::TCFType,
     boolean::CFBoolean,
     dictionary::CFDictionary,
+    number::CFNumber,
     string::CFString,
 };
 use core_graphics::window::{
@@ -29,8 +30,11 @@ use wm98_core::{config::Config, layout::FloatingLayout, theme::Theme};
 /// Lightweight snapshot returned by each sync pass.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
-    pub pid:   i32,
-    pub title: String,
+    pub pid:    i32,
+    pub title:  String,
+    /// Screen-coordinate bounds [x, y, w, h] from kCGWindowBounds.
+    /// Origin is top-left of primary display, Y increases downward.
+    pub bounds: Option<[f64; 4]>,
 }
 
 /// A window tracked by the macOS WM.
@@ -60,21 +64,21 @@ impl WindowManager {
     }
 
     pub fn run(&mut self) -> anyhow::Result<()> {
-        println!("98wm macOS — press Ctrl-C to exit\n");
+        use objc2_foundation::MainThreadMarker;
+        use crate::decorations::{init_app, OverlayManager};
 
-        let mut tick: u64 = 0;
+        // Safety: run() is called directly from main(), which is the main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+
+        init_app(mtm);
+
+        let mut overlays = OverlayManager::new();
+        println!("98wm macOS — overlays active, press Ctrl-C to exit");
+
         loop {
             let windows = self.sync_windows()?;
-
-            // Print the window list every second (every 10 ticks × 100 ms)
-            if tick % 10 == 0 {
-                println!("--- tick {} — {} window(s) ---", tick, windows.len());
-                for w in &windows {
-                    println!("  [{:>6}]  {}", w.pid, w.title);
-                }
-            }
-
-            tick += 1;
+            overlays.sync(&windows, &self.theme, mtm);
+            overlays.pump_events();
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -97,10 +101,11 @@ impl WindowManager {
         let array: CFArray<CFDictionary<CFString, CFType>> =
             unsafe { CFArray::wrap_under_create_rule(raw as _) };
 
-        let pid_key   = CFString::from_static_string("kCGWindowOwnerPID");
-        let name_key  = CFString::from_static_string("kCGWindowOwnerName");
-        let title_key = CFString::from_static_string("kCGWindowName");
-        let layer_key = CFString::from_static_string("kCGWindowLayer");
+        let pid_key    = CFString::from_static_string("kCGWindowOwnerPID");
+        let name_key   = CFString::from_static_string("kCGWindowOwnerName");
+        let title_key  = CFString::from_static_string("kCGWindowName");
+        let layer_key  = CFString::from_static_string("kCGWindowLayer");
+        let bounds_key = CFString::from_static_string("kCGWindowBounds");
 
         let mut seen = Vec::new();
 
@@ -138,9 +143,23 @@ impl WindowManager {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            let label = if title.is_empty() { app } else { format!("{title}") };
+            let label = if title.is_empty() { app } else { title };
 
-            seen.push(WindowInfo { pid, title: label });
+            // kCGWindowBounds is a CFDictionary<CFString, CFNumber> with X/Y/Width/Height
+            let bounds = entry
+                .find(bounds_key.as_concrete_TypeRef())
+                .and_then(|v| v.clone().downcast_into::<CFDictionary<CFString, CFNumber>>())
+                .map(|b| {
+                    let get = |k: &str| {
+                        let key = CFString::new(k);
+                        b.find(key.as_concrete_TypeRef())
+                            .and_then(|n| n.to_f64())
+                            .unwrap_or(0.0)
+                    };
+                    [get("X"), get("Y"), get("Width"), get("Height")]
+                });
+
+            seen.push(WindowInfo { pid, title: label, bounds });
         }
 
         Ok(seen)
