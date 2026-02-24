@@ -1,0 +1,33 @@
+[package]
+name    = "wm98-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wm98-compositor"
+path = "src/main.rs"
+
+[dependencies]
+wm98-core  = { workspace = true }
+anyhow     = { workspace = true }
+log        = { workspace = true }
+env_logger = { workspace = true }
+serde      = { workspace = true }
+thiserror  = { workspace = true }
+tiny-skia  = { workspace = true }
+
+# Wayland compositor stack — Linux only
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay = { version = "0.3", default-features = false, features = [
+    "backend_winit",
+    "backend_drm",
+    "backend_gbm",
+    "backend_egl",
+    "backend_libinput",
+    "backend_udev",
+    "renderer_gl",
+    "desktop",
+    "xwayland",
+    "wayland_frontend",
+] }

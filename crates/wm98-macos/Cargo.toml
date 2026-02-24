@@ -1,0 +1,23 @@
+[package]
+name    = "wm98-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wm98-macos"
+path = "src/main.rs"
+
+[dependencies]
+wm98-core  = { workspace = true }
+anyhow     = { workspace = true }
+log        = { workspace = true }
+env_logger = { workspace = true }
+thiserror  = { workspace = true }
+tiny-skia  = { workspace = true }
+
+# Accessibility + drawing — macOS only
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility   = "0.1"
+core-foundation = "0.9"
+core-graphics   = "0.23"
