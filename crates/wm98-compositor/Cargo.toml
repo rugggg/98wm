@@ -19,7 +19,7 @@ tiny-skia  = { workspace = true }
 
 # Wayland compositor stack — Linux only
 [target.'cfg(target_os = "linux")'.dependencies]
-smithay = { version = "0.3", default-features = false, features = [
+smithay = { version = "0.7", default-features = false, features = [
     "backend_winit",
     "backend_drm",
     "backend_gbm",

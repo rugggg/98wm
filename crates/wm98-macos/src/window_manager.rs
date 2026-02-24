@@ -12,7 +12,13 @@
 //!   4. On hotkey / click, call `set_window_position` / `set_window_size`.
 //!   5. `decorations::OverlayWindow` draws the bubble titlebar on top.
 
-use accessibility::{AXAttribute, AXUIElement};
+use accessibility::AXUIElement;
+use core_foundation::{
+    base::TCFType,
+    boolean::CFBoolean,
+    dictionary::CFDictionary,
+    string::CFString,
+};
 use core_graphics::window::{
     kCGNullWindowID, kCGWindowListOptionOnScreenOnly, CGWindowListCopyWindowInfo,
 };
@@ -27,7 +33,6 @@ pub struct ManagedWindow {
     pub pid:   i32,
     pub title: String,
     pub frame: wm98_core::layout::Rect,
-    pub ax:    AXUIElement,
 }
 
 pub struct WindowManager {
@@ -53,106 +58,86 @@ impl WindowManager {
 
         loop {
             self.sync_windows()?;
-            // TODO: process hotkeys via CGEventTap (see decorations.rs)
+            // TODO: process hotkeys via CGEventTap
             std::thread::sleep(Duration::from_millis(100));
         }
     }
 
     /// Enumerate on-screen windows and update our internal map.
     fn sync_windows(&mut self) -> anyhow::Result<()> {
-        let raw_list = unsafe {
-            CGWindowListCopyWindowInfo(
-                kCGWindowListOptionOnScreenOnly,
-                kCGNullWindowID,
-            )
-        };
-
-        if raw_list.is_null() {
-            return Ok(());
-        }
-
-        // core-graphics returns a CFArray of CFDictionary.
-        // We use the `core-foundation` crate to iterate safely.
+        // CGWindowListCopyWindowInfo returns a CFArrayRef of CFDictionaryRef.
+        // We wrap it in a CFArray<CFDictionary<CFString, CFType>> for safe iteration.
         use core_foundation::{
             array::CFArray,
-            base::{CFType, TCFType},
-            dictionary::CFDictionary,
-            string::CFString,
+            base::CFType,
             number::CFNumber,
         };
 
+        let raw = unsafe {
+            CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)
+        };
+        if raw.is_null() {
+            return Ok(());
+        }
+
         let array: CFArray<CFDictionary<CFString, CFType>> =
-            unsafe { CFArray::wrap_under_create_rule(raw_list) };
+            unsafe { CFArray::wrap_under_create_rule(raw as _) };
+
+        let pid_key  = CFString::from_static_string("kCGWindowOwnerPID");
+        let name_key = CFString::from_static_string("kCGWindowName");
 
         for entry in array.iter() {
-            let pid_key  = CFString::from_static_str("kCGWindowOwnerPID");
-            let name_key = CFString::from_static_str("kCGWindowName");
-
             let pid: i32 = entry
-                .find(&pid_key)
-                .and_then(|(_, v)| v.downcast::<CFNumber>())
+                .find(pid_key.as_concrete_TypeRef())
+                .and_then(|v| v.clone().downcast_into::<CFNumber>())
                 .and_then(|n| n.to_i32())
                 .unwrap_or(0);
 
-            if pid == 0 { continue; }
+            if pid == 0 {
+                continue;
+            }
 
-            let title: String = entry
-                .find(&name_key)
-                .and_then(|(_, v)| v.downcast::<CFString>())
+            let _title: String = entry
+                .find(name_key.as_concrete_TypeRef())
+                .and_then(|v| v.clone().downcast_into::<CFString>())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            // Get AX element for this app
-            let app_ax = AXUIElement::application(pid);
-
-            // Read position and size via AX attributes
-            if let (Ok(pos), Ok(size)) = (
-                app_ax.attribute(&AXAttribute::new(&CFString::from_static_str("AXPosition"))),
-                app_ax.attribute(&AXAttribute::new(&CFString::from_static_str("AXSize"))),
-            ) {
-                // TODO: decode pos/size from AXValue (CGPoint / CGSize)
-                let _ = (pos, size, title, pid);
-            }
+            // TODO: read AXPosition / AXSize for this pid via the AX API,
+            // then upsert into self.layout and self.windows.
         }
 
         Ok(())
     }
 
     /// Move a window to (x, y) using the Accessibility API.
+    ///
+    /// CGPoint must be packed into an AXValue before setting — see:
+    /// https://developer.apple.com/documentation/appkit/nsaccessibility/position
     pub fn move_window(&self, pid: i32, x: f64, y: f64) -> anyhow::Result<()> {
-        use core_foundation::string::CFString;
-        use accessibility::AXAttribute;
-
-        let app = AXUIElement::application(pid);
-
-        // AXPosition takes a CGPoint wrapped in AXValue — use raw AX API:
-        // TODO: encode CGPoint as AXValue and call AXUIElementSetAttributeValue.
-        // See: https://developer.apple.com/documentation/appkit/nsaccessibility/position
-        let _ = (app, x, y);
+        let _app = AXUIElement::application(pid);
+        // TODO: encode (x, y) as AXValueType::kAXValueCGPointType via
+        //       AXValueCreate and call AXUIElementSetAttributeValue.
+        let _ = (x, y);
         Ok(())
     }
 }
 
-/// Check that Accessibility permissions have been granted.
+/// Check that Accessibility permissions have been granted; prompt if not.
 fn check_accessibility_permission() -> anyhow::Result<()> {
-    // AXIsProcessTrustedWithOptions — prompt if not already granted
-    let trusted = unsafe {
-        use core_foundation::dictionary::CFDictionary;
-        use core_foundation::string::CFString;
-        use core_foundation::boolean::CFBoolean;
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(
+            options: core_foundation::base::CFTypeRef,
+        ) -> bool;
+    }
 
-        extern "C" {
-            fn AXIsProcessTrustedWithOptions(options: core_foundation::base::CFTypeRef) -> bool;
-        }
+    let prompt_key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+    let dict = CFDictionary::from_CFType_pairs(&[(
+        prompt_key.as_CFType(),
+        CFBoolean::true_value().as_CFType(),
+    )]);
 
-        let prompt_key = CFString::from_static_str("AXTrustedCheckOptionPrompt");
-        let dict = CFDictionary::from_CFType_pairs(&[(
-            prompt_key.as_CFType(),
-            CFBoolean::true_value().as_CFType(),
-        )]);
-
-        AXIsProcessTrustedWithOptions(dict.as_CFTypeRef())
-    };
+    let trusted = unsafe { AXIsProcessTrustedWithOptions(dict.as_CFTypeRef()) };
 
     if !trusted {
         anyhow::bail!(
