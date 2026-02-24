@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/wm98-core",
+    "crates/wm98-compositor",
+    "crates/wm98-macos",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+wm98-core = { path = "crates/wm98-core" }
+anyhow     = "1"
+log        = "0.4"
+env_logger = "0.11"
+serde      = { version = "1", features = ["derive"] }
+thiserror  = "1"
+tiny-skia  = "0.11"
+toml       = "0.8"
